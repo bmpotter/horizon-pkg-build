@@ -11,10 +11,14 @@ import (
 	"time"
 )
 
+// CheckType is a quasi-enum for FS object checking
 type CheckType int
 
 const (
+	// WRITEDIR describes a writable fs directory
 	WRITEDIR CheckType = iota
+
+	// EXISTINGFILE describes a readable file type
 	EXISTINGFILE
 )
 

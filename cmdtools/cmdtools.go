@@ -9,12 +9,20 @@ import (
 )
 
 const (
-	Version           = "0.1.0"
-	OutputInfoPrefix  = "[INFO]"
+	// Version describes CLI compatibility
+	Version = "0.1.0"
+
+	// OutputInfoPrefix is a prefix for info output on stderr
+	OutputInfoPrefix = "[INFO]"
+
+	// OutputDebugPrefix is a prefix for debug output on stderr
 	OutputDebugPrefix = "[DEBUG]"
+
+	// OutputErrorPrefix is a prefix for error output on stderr
 	OutputErrorPrefix = "[ERROR]"
 )
 
+// DelegateError is a subtype of error indicating an error that occured in a worker or other async process
 type DelegateError struct {
 	UserError bool
 	Breaking  bool // indicates that the error isn't transient and stopped processing
@@ -59,18 +67,20 @@ func NewSynchronizedReporter(bufferLen int, pipeWatchSleep time.Duration) *Synch
 	return reporter
 }
 
+// DelegateErrorConsumer takes a functionn for handling errors from delegates transmitted using a Reporter's ErrChannel
 func (s *SynchronizedReporter) DelegateErrorConsumer(fn func(e DelegateError)) {
 
 	go func() {
 		for {
 			// blocking read
 			e := <-s.errChannel
-			s.DelegateErrorCount += 1
+			s.DelegateErrorCount++
 			fn(e)
 		}
 	}()
 }
 
+// DelegateErr enqueues an error in the ErrChannel
 func (s *SynchronizedReporter) DelegateErr(userError bool, breaking bool, msg string) {
 
 	s.errChannel <- DelegateError{
