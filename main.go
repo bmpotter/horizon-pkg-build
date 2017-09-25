@@ -2,18 +2,13 @@ package main
 
 import (
 	"fmt"
-	"github.com/open-horizon/horizon-pkg-build/create"
-	//	"github.com/open-horizon/rsapss-tool/sign"
 	docker "github.com/fsouza/go-dockerclient"
+	"github.com/open-horizon/horizon-pkg-build/cmdtools"
+	"github.com/open-horizon/horizon-pkg-build/create"
 	"github.com/urfave/cli"
+	"net/url"
 	"os"
-)
-
-const (
-	version           = "0.1.0"
-	outputInfoPrefix  = "[INFO]"
-	outputDebugPrefix = "[DEBUG]"
-	outputErrorPrefix = "[ERROR]"
+	"time"
 )
 
 type CheckType int
@@ -47,7 +42,28 @@ func checkAccess(ty CheckType, target string) error {
 	return nil
 }
 
-func createAction(ctx *cli.Context) error {
+func dockerConnect(ctx *cli.Context) (*docker.Client, error) {
+	dockerEndpoint := ctx.String("dockerendpoint")
+	if dockerEndpoint == "" {
+		return nil, cli.NewExitError("Required option 'dockerendpoint' not provided. Use the '--help' option for more information.", 2)
+	}
+
+	dockerClient, err := docker.NewClient(dockerEndpoint)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s Docker client setup error: %v\n", cmdtools.OutputErrorPrefix, err)
+		return nil, cli.NewExitError("Docker client could not be set up.", 2)
+	}
+
+	err = dockerClient.Ping()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s Endpoint connection error: %v\n", cmdtools.OutputErrorPrefix, err)
+		return nil, cli.NewExitError(fmt.Sprintf("Docker endpoint %v Unreachable.", dockerEndpoint), 2)
+	}
+
+	return dockerClient, nil
+}
+
+func createAction(reporter *cmdtools.SynchronizedReporter, ctx *cli.Context) error {
 	outputDir := ctx.String("outputdir")
 	if outputDir == "" {
 		return cli.NewExitError("Required option 'outputDir' not provided. Use the '--help' option for more information.", 2)
@@ -66,6 +82,11 @@ func createAction(ctx *cli.Context) error {
 		return cli.NewExitError(fmt.Sprintf("Error accessing privateKey: %v", err), 2)
 	}
 
+	dockerClient, err := dockerConnect(ctx)
+	if err != nil {
+		return err // already a cli error
+	}
+
 	images := ctx.StringSlice("dockerimage")
 	if len(images) == 0 {
 		return cli.NewExitError("Required option(s) 'dockerimage' not provided. Use the '--help' option for more information", 2)
@@ -76,39 +97,30 @@ func createAction(ctx *cli.Context) error {
 		return cli.NewExitError("Required option 'author' not provided. Use the '--help' option for more information.", 2)
 	}
 
-	dockerEndpoint := ctx.String("dockerendpoint")
-	if dockerEndpoint == "" {
-		return cli.NewExitError("Required option 'dockerendpoint' not provided. Use the '--help' option for more information.", 2)
-	}
-
-	dockerClient, err := docker.NewClient(dockerEndpoint)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s Docker client setup error: %v\n", outputErrorPrefix, err)
-		return cli.NewExitError("Docker client could not be set up.", 2)
-	}
-
-	err = dockerClient.Ping()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%s Endpoint connection error: %v\n", outputErrorPrefix, err)
-		return cli.NewExitError(fmt.Sprintf("Docker endpoint %v Unreachable.", dockerEndpoint), 2)
-	}
-
 	parturlbase := ctx.String("parturlbase")
 	if parturlbase == "" {
 		return cli.NewExitError("Required option 'parturlbase' not provided. Use the '--help' option for more information.", 2)
+	} else if _, err := url.Parse(parturlbase); err != nil {
+		return cli.NewExitError(fmt.Sprintf("Unable to use provided value for 'parturlbase'. Error: %v", err), 2)
 	}
 
-	// TODO: check that URL validates
+	var delegateError error
+	reporter.DelegateErrorConsumer(func(e cmdtools.DelegateError) {
+		fmt.Fprintf(os.Stderr, "%s Error creating new Pkg: %v", cmdtools.OutputErrorPrefix, e.Error())
 
-	err = create.NewPkg(dockerClient, outputDir, author, privateKey, parturlbase, images)
-	if err != nil {
-		// TODO: improve output of possibly multiple errors
-		fmt.Fprintf(os.Stderr, "%s Error(s) creating new Horizon Pkg: %v\n", outputErrorPrefix, err)
-		// TODO: wrap this error in a cleanup operation
-		return cli.NewExitError("Failed to create Horizon Pkg", 3)
-	}
+		var code int
+		if e.UserError {
+			code = 2
+		} else {
+			code = 3
+		}
 
-	return nil
+		delegateError = cli.NewExitError("Failed to create Pkg", code)
+	})
+
+	// do the work; any breaking errors will cause DelegateErrorConsumer call its function handler
+	create.NewPkg(reporter, dockerClient, outputDir, author, privateKey, parturlbase, images)
+	return delegateError
 }
 
 func main() {
@@ -116,7 +128,7 @@ func main() {
 	app.EnableBashCompletion = true
 
 	app.Name = "horizon-pkg-build"
-	app.Version = version
+	app.Version = cmdtools.Version
 	app.Usage = "Create, validate, and upload Horizon Pkg metadata and parts"
 
 	app.Flags = []cli.Flag{
@@ -125,10 +137,13 @@ func main() {
 
 	app.Action = func(ctx *cli.Context) error {
 		if ctx.Bool("debug") {
-			fmt.Fprintf(os.Stderr, "%s debug output enabled.\n", outputInfoPrefix)
+			fmt.Fprintf(os.Stderr, "%s debug output enabled.\n", cmdtools.OutputInfoPrefix)
 		}
 		return nil
 	}
+
+	// set up reporter
+	reporter := cmdtools.NewSynchronizedReporter(512, time.Duration(5*time.Millisecond))
 
 	app.Commands = []cli.Command{
 		cli.Command{
@@ -171,11 +186,13 @@ func main() {
 					EnvVar: "HZNPKG_DOCKERENDPOINT",
 				},
 			},
-			Action: createAction,
-		}}
+			// curry the action with an anonymous function so we can get a reporter passed
+			Action: func(ctx *cli.Context) error { return createAction(reporter, ctx) },
+		},
+	}
 
 	app.Run(os.Args)
 
-	fmt.Fprintf(os.Stderr, "%s Exiting.\n", outputInfoPrefix)
+	fmt.Fprintf(os.Stderr, "%s Exiting.\n", cmdtools.OutputInfoPrefix)
 	os.Exit(0)
 }
