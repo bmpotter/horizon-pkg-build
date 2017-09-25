@@ -1,4 +1,4 @@
-# horizon-workoad-package
+# horizon-pkg-build
 
 ## Introduction
 
@@ -55,4 +55,4 @@ Notable `make` targets include:
  * `all` (default) - Compile source and produce binary
  * `clean` - Clean build artifacts
  * `lint` - Execute Golang code analysis tools to report ill code style
- * `check` - Execute both unit and integration tests
+ * `check` - Execute lint toosl, then unit and integration tests
