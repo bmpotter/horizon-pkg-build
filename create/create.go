@@ -16,7 +16,6 @@ import (
 	"path"
 	"strings"
 	"sync"
-	"time"
 )
 
 // Returns sha256hash, filename, full path to written file, and err.
@@ -38,9 +37,8 @@ func writeDockerImage(client *docker.Client, tmpDir string, image string) (strin
 	multiWriter := io.MultiWriter(hashWriter, gzipFileWriter)
 
 	opts := docker.ExportImageOptions{
-		Name:              image,
-		InactivityTimeout: time.Second * 20,
-		OutputStream:      multiWriter,
+		Name:         image,
+		OutputStream: multiWriter,
 	}
 
 	if err := client.ExportImage(opts); err != nil {
