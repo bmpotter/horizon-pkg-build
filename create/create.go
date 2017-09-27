@@ -14,60 +14,114 @@ import (
 	"io/ioutil"
 	"os"
 	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 )
 
-// Returns sha256hash, filename, full path to written file, and err.
-// N.B. The hash is calculated on the *uncompressed* content; this is so we can change
-// the compression mechanism (or different hosts can pick alt. storage formats) and we
-// can still reliably check the signature after decompression.
-func writeDockerImage(client *docker.Client, tmpDir string, image string) (string, hash.Hash, string, error) {
+func exportImageToFile(client *docker.Client, tmpDir string, image string) (string, string, error) {
+
 	dockerSafeName := strings.Replace(image, "/", "_", -1)
 
-	tmpFile, err := ioutil.TempFile(tmpDir, dockerSafeName)
+	dockerSafeTmpFileName := fmt.Sprintf("%s.tar", dockerSafeName)
+	tmpFile, err := ioutil.TempFile(tmpDir, dockerSafeTmpFileName)
 	if err != nil {
-		return "", nil, "", err
+		return "", "", err
 	}
 	defer tmpFile.Close()
 
-	gzipFileWriter := gzip.NewWriter(tmpFile)
-	// N.B. It's important that this match the signing tools' expectations, we reuse this hash
-	hashWriter := sha256.New()
-	multiWriter := io.MultiWriter(hashWriter, gzipFileWriter)
-
 	opts := docker.ExportImageOptions{
 		Name:         image,
-		OutputStream: multiWriter,
+		OutputStream: tmpFile,
 	}
 
 	if err := client.ExportImage(opts); err != nil {
-		return "", nil, "", err
-	}
-
-	if err := gzipFileWriter.Flush(); err != nil {
-		return "", nil, "", err
-	}
-
-	if err := gzipFileWriter.Close(); err != nil {
-		return "", nil, "", err
+		return "", "", err
 	}
 
 	if err := tmpFile.Sync(); err != nil {
-		return "", nil, "", err
+		return "", "", err
 	}
+
+	return tmpFile.Name(), dockerSafeTmpFileName, nil
+}
+
+func compressImageFile(tmpDir string, fileName string, dockerSafeTmpFileName string) (string, string, int64, error) {
+
+	dockerSafeTmpCompressedFileName := fmt.Sprintf("%s.tgz", dockerSafeTmpFileName[0:len(dockerSafeTmpFileName)-len(filepath.Ext(dockerSafeTmpFileName))])
+	tmpCompressedFile, err := ioutil.TempFile(tmpDir, dockerSafeTmpCompressedFileName)
+	if err != nil {
+		return "", "", 0, err
+	}
+	defer tmpCompressedFile.Close()
+
+	// now compress
+	gzipFileWriter, err := gzip.NewWriterLevel(tmpCompressedFile, gzip.BestCompression)
+	if err != nil {
+		return "", "", 0, err
+	}
+	defer gzipFileWriter.Close()
+
+	tmpFile, err := os.Open(fileName)
+	if err != nil {
+		return "", "", 0, err
+	}
+	defer tmpFile.Close()
+
+	unzippedBytes, err := io.Copy(gzipFileWriter, tmpFile)
+	if err != nil {
+		return "", "", 0, err
+	}
+
+	if err := gzipFileWriter.Flush(); err != nil {
+		return "", "", 0, err
+	}
+
+	return tmpCompressedFile.Name(), dockerSafeTmpCompressedFileName, unzippedBytes, nil
+}
+
+// Returns sha256hash, filename, full path to written file, and err.
+// N.B. The hash is calculated on the *compressed* content.
+func writeDockerImage(client *docker.Client, tmpDir string, image string) (hash.Hash, string, string, int64, error) {
+
+	tmpFileName, dockerSafeTmpFileName, err := exportImageToFile(client, tmpDir, image)
+	if err != nil {
+		return nil, "", "", 0, err
+	}
+	defer os.Remove(tmpFileName)
+
+	tmpCompressedFileName, dockerSafeTmpCompressedFileName, _, err := compressImageFile(tmpDir, tmpFileName, dockerSafeTmpFileName)
+	if err != nil {
+		return nil, "", "", 0, err
+	}
+
+	tmpCompressedFile, err := os.Open(tmpCompressedFileName)
+	if err != nil {
+		return nil, "", "", 0, err
+	}
+
+	// N.B. It's important that this match the signing tools' expectations, we reuse this hash
+	hashWriter := sha256.New()
+	compressedBytes, err := io.Copy(hashWriter, tmpCompressedFile)
+	if err != nil {
+		return nil, "", "", 0, err
+	}
+
+	tmpCompressedFile.Close()
 
 	hash := fmt.Sprintf("%x", hashWriter.Sum(nil))
 
-	fileName := fmt.Sprintf("%v.tar.gz", hash)
+	fileName := fmt.Sprintf("%v%s", hash, filepath.Ext(dockerSafeTmpCompressedFileName))
 	permPath := path.Join(tmpDir, fileName)
 
-	err = os.Rename(tmpFile.Name(), permPath)
+	err = os.Rename(tmpCompressedFile.Name(), permPath)
 	if err != nil {
-		return "", nil, tmpFile.Name(), err
+		return nil, "", tmpCompressedFile.Name(), 0, err
 	}
 
-	return fileName, hashWriter, permPath, err
+	// N.B. The temporary files get removed when the tmpdir containing them does in the event of an error
+
+	return hashWriter, fileName, permPath, compressedBytes, err
 }
 
 // the worker part of the concurrent image processing operations
@@ -76,10 +130,10 @@ func exportDockerImage(reporter *cmdtools.SynchronizedReporter, group *sync.Wait
 
 	fmt.Fprintf(reporter.ErrWriter, "%s Beginning processing Docker image: %v\n", cmdtools.OutputInfoPrefix, image)
 
-	fileName, hashWriter, filePath, err := writeDockerImage(client, tmpDir, image)
+	hashWriter, fileName, _, compressedBytes, err := writeDockerImage(client, tmpDir, image)
 	if err != nil {
 		// TODO: differentiate b/n errors here: user can specify an image that isn't in the local repo and the client will fail
-		reporter.DelegateErr(false, true, fmt.Sprintf("Error writing docker image %v. Error: %v", image, err))
+		reporter.DelegateErr(false, true, fmt.Sprintf("Error writing docker image %v. Error: %v\n", image, err))
 		return
 	}
 
@@ -92,7 +146,7 @@ func exportDockerImage(reporter *cmdtools.SynchronizedReporter, group *sync.Wait
 	// N.B. The signature is on the *uncompressed* content
 	signature, err := sign.Sha256HashOfInput(privateKey, hashWriter)
 	if err != nil {
-		reporter.DelegateErr(false, true, fmt.Sprintf("Error hashing docker image %v. Error: %v", image, err))
+		reporter.DelegateErr(false, true, fmt.Sprintf("Error hashing docker image %v. Error: %v\n", image, err))
 		return
 	}
 
@@ -103,18 +157,11 @@ func exportDockerImage(reporter *cmdtools.SynchronizedReporter, group *sync.Wait
 	// note: this assumes no funny business was done in writeDockerImage
 	source := horizonpkg.PartSource{URL: fmt.Sprintf("%s/%s/%s", strings.TrimRight(urlBase, "/"), pkgBuilder.ID(), fileName)}
 
-	// determine bytes of filePath
-	info, err := os.Stat(filePath)
-	if err != nil {
-		reporter.DelegateErr(false, true, fmt.Sprintf("Error processing docker image %v. Error: %v", image, err))
-		return
-	}
-
 	// we use the shasum as the name for the part
 	sha256sum := fmt.Sprintf("%x", hashWriter.Sum(nil))
-	_, err = pkgBuilder.AddPart(sha256sum, sha256sum, image, signatures, info.Size(), source)
+	_, err = pkgBuilder.AddPart(sha256sum, sha256sum, image, signatures, compressedBytes, source)
 	if err != nil {
-		reporter.DelegateErr(false, true, fmt.Sprintf("Error adding Pkg part %v. Error: %v", sha256sum, err))
+		reporter.DelegateErr(false, true, fmt.Sprintf("Error adding Pkg part %v. Error: %v\n", sha256sum, err))
 		return
 	}
 
@@ -124,25 +171,24 @@ func exportDockerImage(reporter *cmdtools.SynchronizedReporter, group *sync.Wait
 // NewPkg is an exported function that fulfills the primary use case of this
 // module: create a new package and output all relevant material for upload /
 // service to a Horizon edge node.
-func NewPkg(reporter *cmdtools.SynchronizedReporter, client *docker.Client, baseOutputDir string, author string, privateKey string, urlBase string, images []string) {
+func NewPkg(reporter *cmdtools.SynchronizedReporter, client *docker.Client, baseOutputDir string, author string, privateKey string, urlBase string, images []string) (string, string, string) {
 
 	pK, err := sign.ReadPrivateKey(privateKey)
 	if err != nil {
 		reporter.DelegateErr(true, true, fmt.Sprintf("Error reading RSA PSS private key. Error: %v\n", err))
-		return
+		return "", "", ""
 	}
 
 	pkgBuilder, err := horizonpkg.NewDockerImagePkgBuilder(horizonpkg.FILE, author, images)
 	if err != nil {
 		reporter.DelegateErr(false, true, fmt.Sprintf("Error setting up Pkg builder. Error: %v\n", err))
-		return
+		return "", "", ""
 	}
 
-	// we leave around the tmpDir if we fail so it can be inspected
 	tmpDir, err := ioutil.TempDir(baseOutputDir, fmt.Sprintf("build-hznpkg-%s-", pkgBuilder.ID()))
 	if err != nil {
 		reporter.DelegateErr(false, true, fmt.Sprintf("Error setting up Pkg builder. Error: %v\n", err))
-		return
+		return "", "", ""
 	}
 	defer os.RemoveAll(tmpDir)
 
@@ -153,27 +199,29 @@ func NewPkg(reporter *cmdtools.SynchronizedReporter, client *docker.Client, base
 	// concurrently process each part
 	for _, image := range images {
 		waitGroup.Add(1)
-		go exportDockerImage(reporter, &waitGroup, client, tmpDir, pkgBuilder, image, urlBase, pK)
+		go func(image string) {
+			exportDockerImage(reporter, &waitGroup, client, tmpDir, pkgBuilder, image, urlBase, pK)
+		}(image)
 	}
 
 	waitGroup.Wait()
 	if reporter.DelegateErrorCount > 0 {
 		// error reporting is done elsewhere, we just need to manage the control flow
 		fmt.Fprintf(reporter.ErrWriter, "%s All parts not processed successfully, discontinuing operations\n", cmdtools.OutputErrorPrefix)
-		return
+		return "", "", ""
 	}
 
 	_, serialized, err := pkgBuilder.Build()
 	if err != nil {
 		reporter.DelegateErr(false, true, fmt.Sprintf("Error building package. Error: %v\n", err))
-		return
+		return "", "", ""
 	}
 
 	pkgFile := path.Join(baseOutputDir, fmt.Sprintf("%s.json", pkgBuilder.ID()))
 	err = ioutil.WriteFile(pkgFile, serialized, 0644)
 	if err != nil {
 		reporter.DelegateErr(false, true, fmt.Sprintf("Error writing Pkg metadata to disk. Error: %v\n", err))
-		return
+		return "", "", ""
 	}
 	fmt.Fprintf(reporter.ErrWriter, "%s Wrote pkg metadata file to: %v\n", cmdtools.OutputInfoPrefix, pkgFile)
 
@@ -181,7 +229,7 @@ func NewPkg(reporter *cmdtools.SynchronizedReporter, client *docker.Client, base
 	pkgSig, err := sign.Input(privateKey, serialized)
 	if err != nil {
 		reporter.DelegateErr(false, true, fmt.Sprintf("Error signing Pkg metadata. Error: %v\n", err))
-		return
+		return "", "", ""
 	}
 
 	pkgSigFile := fmt.Sprintf("%s.sig", pkgFile)
@@ -194,9 +242,9 @@ func NewPkg(reporter *cmdtools.SynchronizedReporter, client *docker.Client, base
 	err = os.Rename(tmpDir, permDir)
 	if err != nil {
 		reporter.DelegateErr(false, true, fmt.Sprintf("Error moving Pkg content to permanent dir from tmpdir. Error: %v\n", err))
-		return
+		return "", "", ""
 	}
 
-	fmt.Fprintf(reporter.ErrWriter, "%s Pkg content preparation finished. Temporary files removed and pkg content written to %v\n", cmdtools.OutputInfoPrefix, permDir)
-	fmt.Fprintf(reporter.OutWriter, "%v %v %v\n", permDir, pkgFile, pkgSigFile)
+	// success
+	return permDir, pkgFile, pkgSigFile
 }

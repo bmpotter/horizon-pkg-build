@@ -123,7 +123,11 @@ func createAction(reporter *cmdtools.SynchronizedReporter, ctx *cli.Context) err
 	})
 
 	// do the work; any breaking errors will cause DelegateErrorConsumer call its function handler
-	create.NewPkg(reporter, dockerClient, outputDir, author, privateKey, parturlbase, images)
+	permDir, pkgFile, pkgSigFile := create.NewPkg(reporter, dockerClient, outputDir, author, privateKey, parturlbase, images)
+	if delegateError == nil {
+		fmt.Fprintf(reporter.ErrWriter, "%s Pkg content preparation finished. Temporary files removed and pkg content written to %v\n", cmdtools.OutputInfoPrefix, permDir)
+		fmt.Fprintf(reporter.OutWriter, "%v %v %v\n", permDir, pkgFile, pkgSigFile)
+	}
 	return delegateError
 }
 
