@@ -56,7 +56,10 @@ func compressImageFile(tmpDir string, fileName string, dockerSafeTmpFileName str
 	defer tmpCompressedFile.Close()
 
 	// now compress
-	gzipFileWriter := gzip.NewWriter(tmpCompressedFile)
+	gzipFileWriter, err := gzip.NewWriterLevel(tmpCompressedFile, gzip.BestCompression)
+	if err != nil {
+		return "", "", 0, err
+	}
 	defer gzipFileWriter.Close()
 
 	tmpFile, err := os.Open(fileName)
