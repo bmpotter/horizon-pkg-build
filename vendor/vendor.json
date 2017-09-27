@@ -225,6 +225,12 @@
 			"revisionTime": "2016-01-25T20:49:56Z"
 		},
 		{
+			"checksumSHA1": "7AIi50OMmxEKBVV+ei/i9RWC6pQ=",
+			"path": "github.com/open-horizon/horizon-pkg-fetch",
+			"revision": "c231377c4c05ea727ff86c744b33994f60a3984b",
+			"revisionTime": "2017-09-27T03:06:36Z"
+		},
+		{
 			"checksumSHA1": "iOTbDYrxDzuIXu+c2GKxBdXDmf0=",
 			"path": "github.com/open-horizon/horizon-pkg-fetch/horizonpkg",
 			"revision": "44f6e195e4b5ab47a965810385bd48f5807ad306",
