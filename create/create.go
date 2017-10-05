@@ -114,8 +114,11 @@ func writeDockerImage(client *docker.Client, tmpDir string, image string) (hash.
 	fileName := fmt.Sprintf("%v%s", hash, filepath.Ext(dockerSafeTmpCompressedFileName))
 	permPath := path.Join(tmpDir, fileName)
 
-	err = os.Rename(tmpCompressedFile.Name(), permPath)
-	if err != nil {
+	if err := os.Chmod(tmpCompressedFile.Name(), 0644); err != nil {
+		return nil, "", tmpCompressedFile.Name(), 0, err
+	}
+
+	if err := os.Rename(tmpCompressedFile.Name(), permPath); err != nil {
 		return nil, "", tmpCompressedFile.Name(), 0, err
 	}
 
@@ -237,10 +240,14 @@ func NewPkg(reporter *cmdtools.SynchronizedReporter, client *docker.Client, base
 
 	fmt.Fprintf(reporter.ErrWriter, "%s Signed pkg metadata file and wrote signature to file: %v\n", cmdtools.OutputInfoPrefix, pkgSigFile)
 
-	// all succeeded, move tmp dir
+	// all succeeded, change perms then move tmp dir
+	if err := os.Chmod(tmpDir, 0755); err != nil {
+		reporter.DelegateErr(false, true, fmt.Sprintf("Error changing perms on tmpdir. Error: %v\n", err))
+		return "", "", ""
+	}
+
 	permDir := path.Join(baseOutputDir, string(os.PathSeparator), pkgBuilder.ID())
-	err = os.Rename(tmpDir, permDir)
-	if err != nil {
+	if err := os.Rename(tmpDir, permDir); err != nil {
 		reporter.DelegateErr(false, true, fmt.Sprintf("Error moving Pkg content to permanent dir from tmpdir. Error: %v\n", err))
 		return "", "", ""
 	}
