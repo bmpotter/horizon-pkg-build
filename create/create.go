@@ -19,7 +19,29 @@ import (
 	"sync"
 )
 
-func exportImageToFile(client *docker.Client, tmpDir string, image string) (string, string, error) {
+func imageExistsAtTarget(client *docker.Client, image string) (bool, error) {
+	opts := docker.ListImagesOptions{
+		All:    true,
+		Filter: image,
+	}
+
+	images, err := client.ListImages(opts)
+	if err != nil {
+		return false, err
+	}
+
+	for _, im := range images {
+		for _, t := range im.RepoTags {
+			if t == image {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+
+}
+
+func exportImageToFile(client *docker.Client, authConfigurations *docker.AuthConfigurations, tmpDir string, image string) (string, string, error) {
 
 	dockerSafeName := strings.Replace(image, "/", "_", -1)
 
@@ -30,12 +52,55 @@ func exportImageToFile(client *docker.Client, tmpDir string, image string) (stri
 	}
 	defer tmpFile.Close()
 
-	opts := docker.ExportImageOptions{
+	// fetch image if it doesn't exist locally
+	imageExists, err := imageExistsAtTarget(client, image)
+	if err != nil {
+		return "", "", err
+	}
+
+	if !imageExists {
+		spl := strings.Split(image, ":")
+
+		if len(spl) != 2 {
+			return "", "", fmt.Errorf("Unable to parse given image name: %v", image)
+		}
+
+		repo := spl[0]
+		var repoAuth docker.AuthConfiguration
+
+		if authConfigurations != nil {
+			serverAddressSpl := strings.Split(repo, "/")
+			var serverAddress string
+
+			if len(serverAddressSpl) > 1 {
+				serverAddress = serverAddressSpl[0]
+
+				for _, ra := range authConfigurations.Configs {
+					if ra.ServerAddress == serverAddress {
+						repoAuth = ra
+					}
+				}
+			} // if we didn't find one, we'll try the pull without
+		}
+
+		pullOpts := docker.PullImageOptions{
+			Repository: repo,
+			Tag:        spl[1],
+		}
+
+		// TODO: support authenticated pull
+		if err := client.PullImage(pullOpts, repoAuth); err != nil {
+			return "", "", err
+		}
+	}
+
+	// pulled by now
+	exportOpts := docker.ExportImageOptions{
 		Name:         image,
 		OutputStream: tmpFile,
 	}
 
-	if err := client.ExportImage(opts); err != nil {
+	if err := client.ExportImage(exportOpts); err != nil {
 		return "", "", err
 	}
 
@@ -82,9 +147,9 @@ func compressImageFile(tmpDir string, fileName string, dockerSafeTmpFileName str
 
 // Returns sha256hash, filename, full path to written file, and err.
 // N.B. The hash is calculated on the *compressed* content.
-func writeDockerImage(client *docker.Client, tmpDir string, image string) (hash.Hash, string, string, int64, error) {
+func writeDockerImage(client *docker.Client, authConfigurations *docker.AuthConfigurations, tmpDir string, image string) (hash.Hash, string, string, int64, error) {
 
-	tmpFileName, dockerSafeTmpFileName, err := exportImageToFile(client, tmpDir, image)
+	tmpFileName, dockerSafeTmpFileName, err := exportImageToFile(client, authConfigurations, tmpDir, image)
 	if err != nil {
 		return nil, "", "", 0, err
 	}
@@ -128,12 +193,12 @@ func writeDockerImage(client *docker.Client, tmpDir string, image string) (hash.
 }
 
 // the worker part of the concurrent image processing operations
-func exportDockerImage(reporter *cmdtools.SynchronizedReporter, group *sync.WaitGroup, client *docker.Client, tmpDir string, pkgBuilder *horizonpkg.PkgBuilder, image string, urlBase string, privateKey *rsa.PrivateKey) {
+func exportDockerImage(reporter *cmdtools.SynchronizedReporter, group *sync.WaitGroup, client *docker.Client, authConfigurations *docker.AuthConfigurations, tmpDir string, pkgBuilder *horizonpkg.PkgBuilder, image string, urlBase string, privateKey *rsa.PrivateKey) {
 	defer group.Done()
 
 	fmt.Fprintf(reporter.ErrWriter, "%s Beginning processing Docker image: %v\n", cmdtools.OutputInfoPrefix, image)
 
-	hashWriter, fileName, _, compressedBytes, err := writeDockerImage(client, tmpDir, image)
+	hashWriter, fileName, _, compressedBytes, err := writeDockerImage(client, authConfigurations, tmpDir, image)
 	if err != nil {
 		// TODO: differentiate b/n errors here: user can specify an image that isn't in the local repo and the client will fail
 		reporter.DelegateErr(false, true, fmt.Sprintf("Error writing docker image %v. Error: %v\n", image, err))
@@ -174,7 +239,7 @@ func exportDockerImage(reporter *cmdtools.SynchronizedReporter, group *sync.Wait
 // NewPkg is an exported function that fulfills the primary use case of this
 // module: create a new package and output all relevant material for upload /
 // service to a Horizon edge node.
-func NewPkg(reporter *cmdtools.SynchronizedReporter, client *docker.Client, baseOutputDir string, author string, privateKey string, urlBase string, images []string) (string, string, string) {
+func NewPkg(reporter *cmdtools.SynchronizedReporter, client *docker.Client, authConfigurations *docker.AuthConfigurations, baseOutputDir string, author string, privateKey string, urlBase string, images []string) (string, string, string) {
 
 	pK, err := sign.ReadPrivateKey(privateKey)
 	if err != nil {
@@ -203,7 +268,7 @@ func NewPkg(reporter *cmdtools.SynchronizedReporter, client *docker.Client, base
 	for _, image := range images {
 		waitGroup.Add(1)
 		go func(image string) {
-			exportDockerImage(reporter, &waitGroup, client, tmpDir, pkgBuilder, image, urlBase, pK)
+			exportDockerImage(reporter, &waitGroup, client, authConfigurations, tmpDir, pkgBuilder, image, urlBase, pK)
 		}(image)
 	}
 

@@ -108,6 +108,18 @@ func createAction(reporter *cmdtools.SynchronizedReporter, ctx *cli.Context) err
 		return cli.NewExitError(fmt.Sprintf("Unable to use provided value for 'parturlbase'. Error: %v", err), 2)
 	}
 
+	var authConfigurations *docker.AuthConfigurations
+	readauthconfig := ctx.Bool("readauthconfig")
+	if !readauthconfig {
+		fmt.Fprintf(os.Stderr, "%s Option 'readauthconfig' not set, proceeding without credentialed requests.", cmdtools.OutputInfoPrefix)
+	} else {
+		var err error
+		authConfigurations, err = docker.NewAuthConfigurationsFromDockerCfg()
+		if err != nil {
+			return cli.NewExitError(fmt.Sprintf("Unable to read authentication information from Docker configuration files. Set DOCKER_CONFIG envvar to a configuration file path or put a proper Docker configuration file in one its common locations. Error: %v", err), 2)
+		}
+	}
+
 	var delegateError error
 	reporter.DelegateErrorConsumer(func(e cmdtools.DelegateError) {
 		fmt.Fprintf(os.Stderr, "%s Error creating new Pkg: %v", cmdtools.OutputErrorPrefix, e.Error())
@@ -123,7 +135,7 @@ func createAction(reporter *cmdtools.SynchronizedReporter, ctx *cli.Context) err
 	})
 
 	// do the work; any breaking errors will cause DelegateErrorConsumer call its function handler
-	permDir, pkgFile, pkgSigFile := create.NewPkg(reporter, dockerClient, outputDir, author, privateKey, parturlbase, images)
+	permDir, pkgFile, pkgSigFile := create.NewPkg(reporter, dockerClient, authConfigurations, outputDir, author, privateKey, parturlbase, images)
 	if delegateError == nil {
 		fmt.Fprintf(reporter.ErrWriter, "%s Pkg content preparation finished. Temporary files removed and pkg content written to %v\n", cmdtools.OutputInfoPrefix, permDir)
 		fmt.Fprintf(reporter.OutWriter, "%v %v %v\n", permDir, pkgFile, pkgSigFile)
@@ -139,6 +151,7 @@ func main() {
 	app.Version = cmdtools.Version
 	app.Usage = "Create, validate, and upload Horizon Pkg metadata and parts"
 
+	// TODO: support debug with more logging
 	app.Flags = []cli.Flag{
 		cli.BoolFlag{Name: "debug", EnvVar: "HZNPKG_DEBUG"},
 	}
@@ -172,7 +185,7 @@ func main() {
 				cli.StringFlag{
 					Name:   "parturlbase, u",
 					Value:  "",
-					Usage:  "A URL base (e.g. https://hovitos.engineering/hznpkg) that prefixes downloadable pkg parts output by this program. It is expected that the pkg directory written to the given outputdir (d) will be available at the given url base.",
+					Usage:  "A URL base (e.g. https://hovitos.engineering/hznpkg) that prefixes downloadable pkg parts output by this program. It is expected that the pkg directory written to the given outputdir (d) will be available at the given url base",
 					EnvVar: "HZNPKG_URLBASE",
 				},
 				cli.StringFlag{
@@ -192,6 +205,12 @@ func main() {
 					Value:  "unix:///var/run/docker.sock",
 					Usage:  "Local or remote Docker API endpoint from which images will be fetched",
 					EnvVar: "HZNPKG_DOCKERENDPOINT",
+				},
+				// a BoolFlag is false by default, BoolT is true by default
+				cli.BoolFlag{
+					Name:   "readauthconfig, rac",
+					Usage:  "Enable reading authentication information from a Docker configuration file, e.g. $HOME/.docker/config.json, $HOME/.dockercfg, or path pointed-to by envvar DOCKER_CONFIG",
+					EnvVar: "HZNPKG_AUTHOR",
 				},
 			},
 			// curry the action with an anonymous function so we can get a reporter passed
