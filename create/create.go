@@ -19,7 +19,16 @@ import (
 	"sync"
 )
 
-func imageExistsAtTarget(client *docker.Client, image string) (bool, error) {
+// DockerClient is an interface for the parts of fsouza/go-dockerclient that we
+// need; we're abstracting it for testing purposes: we want to avoid generating
+// mock structs
+type DockerClient interface {
+	ExportImage(docker.ExportImageOptions) error
+	ListImages(docker.ListImagesOptions) ([]docker.APIImages, error)
+	PullImage(docker.PullImageOptions, docker.AuthConfiguration) error
+}
+
+func imageExistsAtTarget(client DockerClient, image string) (bool, error) {
 	opts := docker.ListImagesOptions{
 		All:    true,
 		Filter: image,
@@ -41,7 +50,7 @@ func imageExistsAtTarget(client *docker.Client, image string) (bool, error) {
 
 }
 
-func exportImageToFile(client *docker.Client, authConfigurations *docker.AuthConfigurations, tmpDir string, image string) (string, string, error) {
+func exportImageToFile(client DockerClient, skipPullIfExists bool, authConfigurations *docker.AuthConfigurations, tmpDir string, image string) (string, string, error) {
 
 	dockerSafeName := strings.Replace(image, "/", "_", -1)
 
@@ -58,7 +67,7 @@ func exportImageToFile(client *docker.Client, authConfigurations *docker.AuthCon
 		return "", "", err
 	}
 
-	if !imageExists {
+	if !imageExists || imageExists && !skipPullIfExists {
 		spl := strings.Split(image, ":")
 
 		if len(spl) != 2 {
@@ -88,7 +97,6 @@ func exportImageToFile(client *docker.Client, authConfigurations *docker.AuthCon
 			Tag:        spl[1],
 		}
 
-		// TODO: support authenticated pull
 		if err := client.PullImage(pullOpts, repoAuth); err != nil {
 			return "", "", err
 		}
@@ -147,9 +155,9 @@ func compressImageFile(tmpDir string, fileName string, dockerSafeTmpFileName str
 
 // Returns sha256hash, filename, full path to written file, and err.
 // N.B. The hash is calculated on the *compressed* content.
-func writeDockerImage(client *docker.Client, authConfigurations *docker.AuthConfigurations, tmpDir string, image string) (hash.Hash, string, string, int64, error) {
+func writeDockerImage(client DockerClient, skipPullIfExists bool, authConfigurations *docker.AuthConfigurations, tmpDir string, image string) (hash.Hash, string, string, int64, error) {
 
-	tmpFileName, dockerSafeTmpFileName, err := exportImageToFile(client, authConfigurations, tmpDir, image)
+	tmpFileName, dockerSafeTmpFileName, err := exportImageToFile(client, skipPullIfExists, authConfigurations, tmpDir, image)
 	if err != nil {
 		return nil, "", "", 0, err
 	}
@@ -193,12 +201,12 @@ func writeDockerImage(client *docker.Client, authConfigurations *docker.AuthConf
 }
 
 // the worker part of the concurrent image processing operations
-func exportDockerImage(reporter *cmdtools.SynchronizedReporter, group *sync.WaitGroup, client *docker.Client, authConfigurations *docker.AuthConfigurations, tmpDir string, pkgBuilder *horizonpkg.PkgBuilder, image string, urlBase string, privateKey *rsa.PrivateKey) {
+func exportDockerImage(reporter *cmdtools.SynchronizedReporter, group *sync.WaitGroup, client DockerClient, skipPullIfExists bool, authConfigurations *docker.AuthConfigurations, tmpDir string, pkgBuilder *horizonpkg.PkgBuilder, image string, urlBase string, privateKey *rsa.PrivateKey) {
 	defer group.Done()
 
 	fmt.Fprintf(reporter.ErrWriter, "%s Beginning processing Docker image: %v\n", cmdtools.OutputInfoPrefix, image)
 
-	hashWriter, fileName, _, compressedBytes, err := writeDockerImage(client, authConfigurations, tmpDir, image)
+	hashWriter, fileName, _, compressedBytes, err := writeDockerImage(client, skipPullIfExists, authConfigurations, tmpDir, image)
 	if err != nil {
 		// TODO: differentiate b/n errors here: user can specify an image that isn't in the local repo and the client will fail
 		reporter.DelegateErr(false, true, fmt.Sprintf("Error writing docker image %v. Error: %v\n", image, err))
@@ -239,7 +247,7 @@ func exportDockerImage(reporter *cmdtools.SynchronizedReporter, group *sync.Wait
 // NewPkg is an exported function that fulfills the primary use case of this
 // module: create a new package and output all relevant material for upload /
 // service to a Horizon edge node.
-func NewPkg(reporter *cmdtools.SynchronizedReporter, client *docker.Client, authConfigurations *docker.AuthConfigurations, baseOutputDir string, author string, privateKey string, urlBase string, images []string) (string, string, string) {
+func NewPkg(reporter *cmdtools.SynchronizedReporter, client DockerClient, skipPullIfExists bool, authConfigurations *docker.AuthConfigurations, baseOutputDir string, author string, privateKey string, urlBase string, images []string) (string, string, string) {
 
 	pK, err := sign.ReadPrivateKey(privateKey)
 	if err != nil {
@@ -268,7 +276,7 @@ func NewPkg(reporter *cmdtools.SynchronizedReporter, client *docker.Client, auth
 	for _, image := range images {
 		waitGroup.Add(1)
 		go func(image string) {
-			exportDockerImage(reporter, &waitGroup, client, authConfigurations, tmpDir, pkgBuilder, image, urlBase, pK)
+			exportDockerImage(reporter, &waitGroup, client, skipPullIfExists, authConfigurations, tmpDir, pkgBuilder, image, urlBase, pK)
 		}(image)
 	}
 
