@@ -10,7 +10,7 @@ import (
 
 const (
 	// Version describes CLI compatibility
-	Version = "0.2.0"
+	Version = "0.3.0"
 
 	// OutputInfoPrefix is a prefix for info output on stderr
 	OutputInfoPrefix = "[INFO]"
