@@ -111,7 +111,7 @@ func createAction(reporter *cmdtools.SynchronizedReporter, ctx *cli.Context) err
 	var authConfigurations *docker.AuthConfigurations
 	readauthconfig := ctx.Bool("readauthconfig")
 	if !readauthconfig {
-		fmt.Fprintf(os.Stderr, "%s Option 'readauthconfig' not set, proceeding without credentialed requests.", cmdtools.OutputInfoPrefix)
+		fmt.Fprintf(os.Stderr, "%s Option 'readauthconfig' not set, proceeding without credentialed requests.\n", cmdtools.OutputInfoPrefix)
 	} else {
 		var err error
 		authConfigurations, err = docker.NewAuthConfigurationsFromDockerCfg()
@@ -122,7 +122,7 @@ func createAction(reporter *cmdtools.SynchronizedReporter, ctx *cli.Context) err
 
 	skippull := ctx.Bool("skippull")
 	if skippull {
-		fmt.Fprintf(os.Stderr, "%s Option 'skippull' set, this tool will now skip doing a Docker pull from target registry if it exists", cmdtools.OutputInfoPrefix)
+		fmt.Fprintf(os.Stderr, "%s Option 'skippull' set, this tool will now skip performing a Docker pull from target registry", cmdtools.OutputInfoPrefix)
 	}
 
 	var delegateError error
