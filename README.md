@@ -5,6 +5,7 @@
 Related Projects:
 
 * `rsapss-tool` (http://github.com/open-horizon/rsapss-tool): The RSA PSS CLI tool and library used by this project
+* `horizon-pkg-fetch` (https://github.com/open-horizon/horizon-pkg-fetch): Horizon Pkg fetch library
 * `exchange-api` (http://github.com/open-horizon/exchange-api)
 * `anax` (http://github.com/open-horizon/anax)
 
